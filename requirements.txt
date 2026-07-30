@@ -1,0 +1,16 @@
+# scraping (fase 1, sudah dipakai)
+scrapy==2.13.4
+
+# chunking
+transformers
+sentencepiece
+
+# embedding + vector db (fase 1-2)
+sentence-transformers
+qdrant-client
+
+# generation via Ollama (fase 3)
+requests
+
+# UI (fase 5)
+streamlit

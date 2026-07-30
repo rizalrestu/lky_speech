@@ -1,0 +1,11 @@
+[project]
+name = "nas-speech"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "scrapy==2.13.4",
+    "streamlit>=1.60.0",
+    "torchvision>=0.28.0",
+]
