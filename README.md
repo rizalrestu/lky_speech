@@ -197,7 +197,16 @@ python test_retrieval.py
 
 Runs a hand-labeled test set of 10 questions, each paired with the `uid` of the record that should answer it, and reports **Recall@5** (was the right document retrieved at all?) and **MRR** (how high did it rank?).
 
-Questions are deliberately written in Indonesian against an English corpus, which doubles as a check on bge-m3's cross-lingual retrieval.
+Each question was written after reading the target document and asks about something that document actually argues — not merely what its title suggests. A test set built from titles alone measures title matching rather than retrieval.
+
+**Current results:**
+
+| Metric | Score |
+|---|---|
+| Recall@5 | 8/10 (80%) |
+| MRR | 0.653 |
+
+Eight of ten questions retrieve their target document within the top 5. The gap between Recall@5 and MRR shows the correct document often lands at rank 2–3 rather than rank 1 — the expected profile for dense retrieval without a reranker, and the clearest argument for adding a cross-encoder reranking stage.
 
 To extend the test set, find `uid`s by searching record titles:
 ```bash
@@ -297,6 +306,7 @@ If you change `EMBED_MODEL`, you must re-run `chunk.py` **and** `index.py` — t
 
 ## Known limitations
 
+- **`.htm`-only records are never indexed.** `nas_pdfs.py` downloads from each record's `pdf` field, so the subset of NAS records published only as `.htm` — including several 2005 speeches and interviews — is absent from the corpus. Closing this gap means adding an HTML fetch-and-parse path to Stage 2.
 - **PDF extraction quality varies.** Older scanned documents produce noisier text than modern digital PDFs. `chunk_quality_report.py` surfaces the worst offenders.
 - **Fixed-size chunking cuts mid-sentence.** The 100-token overlap mitigates this but doesn't eliminate it; paragraph-aware chunking would read more naturally.
 - **No reranking.** Top-5 vector hits go straight into the prompt. A cross-encoder reranker would improve precision at some latency cost.
