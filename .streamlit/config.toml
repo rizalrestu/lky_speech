@@ -1,0 +1,3 @@
+[client]
+# stack traces leak container paths and the internal Qdrant hostname to visitors
+showErrorDetails = "none"

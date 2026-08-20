@@ -80,7 +80,9 @@ scrapy crawl nas_speeches -a last_page=3 -O data/records.jsonl   # quick test ru
 
 Paginates the NAS advanced-search results (20 items/page), extracting `uid`, `title`, `speaker`, `date`, `source`, `record_url`, and attachment URLs. Duplicate `uid`s across overlapping pages are dropped by `DedupeSummaryPipeline`.
 
-> **Note:** NAS sits behind a WAF that returns `202` with an empty body to browser-like user agents but serves plain HTML to `curl`. `settings.py` therefore sets `USER_AGENT = "curl/8.0"`. Requests are rate-limited to 1 concurrent request with a 1-second delay, and a contact address is sent in the `From` header.
+> **Note:** the crawler identifies itself honestly (`nas-speech-research/0.1 (+mailto:...)`), obeys `robots.txt`, autothrottles, and runs at 1 concurrent request with a 1-second delay.
+>
+> NAS sits behind a WAF that has answered `202` with an empty body to anything but a `curl` user agent. Spoofing it back is deliberately circumventing an access control, so those settings are **not** used. If the crawl stops working, the next step is to email NAS for access — not a better disguise.
 
 ### Stage 2 — Download PDFs
 
@@ -114,10 +116,10 @@ Wraps each text file in YAML frontmatter (`uid`, `title`, `speaker`, `date`, `so
 
 ```bash
 python chunk.py
-python chunk.py --limit 20     # quick preview on 20 documents
+python chunk.py --limit 20     # preview -> data/chunks.preview.jsonl
 ```
 
-Slices each document into 700-token windows with 100-token overlap using the bge-m3 tokenizer, writing one JSON object per chunk to `data/chunks.jsonl` with all document metadata carried through. The redundant `# Title` heading is stripped first so it doesn't consume token budget.
+Slices each document into 700-token windows with 100-token overlap using the bge-m3 tokenizer, writing one JSON object per chunk to `data/chunks.jsonl` with all document metadata carried through. The redundant `# Title` heading is stripped first so it doesn't consume token budget. `--limit` writes to `chunks.preview.jsonl` so a preview can never clobber the real corpus.
 
 ### Stage 6 — Embed and index
 
@@ -125,9 +127,24 @@ Slices each document into 700-token windows with 100-token overlap using the bge
 python index.py
 ```
 
-Embeds chunks in batches of 8 and upserts them into the `lky_speeches` Qdrant collection (cosine distance). Uses CUDA with fp16 if available, otherwise CPU.
+Embeds chunks in batches of 8 and upserts them into the `lky_speeches` Qdrant collection (cosine distance). Uses CUDA if available, otherwise CPU.
 
-**Resumable by design:** progress is checkpointed to `data/embed_progress.json` after every batch. `Ctrl+C` is safe — re-running picks up exactly where it stopped instead of re-embedding from scratch.
+Set `QDRANT_URL` to index into a Qdrant server instead of `data/qdrant_db/`:
+
+```bash
+QDRANT_URL=http://localhost:6333 python index.py
+```
+
+**Idempotent by design:** each point ID is `uuid5(chunk_id)`, so re-running upserts over itself, `Ctrl+C` is safe, and batches already present are skipped without re-embedding. Adding or removing a speech no longer renumbers everything after it.
+
+> **One-time re-index required.** Collections built before the switch to `uuid5` point IDs use positional integers; indexing on top of one would duplicate every chunk rather than replace it. `index.py` detects this and refuses. Drop the old collection and rebuild once:
+>
+> ```bash
+> python -c "from core import get_client, COLLECTION; get_client().delete_collection(COLLECTION)"
+> python index.py
+> ```
+>
+> The existing index is internally consistent, so this can wait — just never run it against a regenerated `chunks.jsonl` before rebuilding.
 
 ---
 
@@ -149,7 +166,7 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
 
-pip install -r requirements.txt
+uv pip install -r pyproject.toml    # or: pip install -e .
 ```
 
 > **CPU-only PyTorch:** the default `torch` wheel pulls ~4 GB of bundled CUDA libraries. Since inference here runs on CPU, install the CPU build first to save the download and disk space:
@@ -175,13 +192,22 @@ Prints the answer followed by the retrieved sources and their scores.
 
 ### Docker
 
+`docker-compose.yml` sets `QDRANT_URL`, which switches `core.py` from embedded mode to server mode — so the containerized stack needs its own index built against the Qdrant service:
+
 ```bash
-docker-compose up -d --build
+cp .env.example .env            # then set a real QDRANT_API_KEY
+docker compose up -d qdrant
+
+# publish 6333 to loopback for the indexing run only
+docker compose run --rm -p 127.0.0.1:6333:6333 qdrant &
+QDRANT_URL=http://localhost:6333 QDRANT_API_KEY=<your key> python index.py
+
+docker compose up -d --build
 ```
 
-Starts Qdrant in server mode plus the Streamlit app. The app container reaches Ollama on the host via `host.docker.internal:11434`, so **Ollama must still be running on the host machine.**
+Qdrant is **not** published to the host: it ships with no authentication, and anyone who can reach it can both wipe the collection and inject points that then land in every visitor's prompt as trusted context. `QDRANT_API_KEY` is therefore required, and the Streamlit app binds to `127.0.0.1:8501` — put a reverse proxy with TLS in front of it before exposing it.
 
-Note that `docker-compose.yml` sets `QDRANT_URL`, which switches `core.py` from embedded mode to server mode — meaning the containerized stack needs its own index built against the Qdrant service. Local (non-Docker) runs leave `QDRANT_URL` unset and read `data/qdrant_db/` directly.
+The app container reaches Ollama on the host via `host.docker.internal:11434`, so **Ollama must still be running on the host machine.** Local (non-Docker) runs leave `QDRANT_URL` unset and read `data/qdrant_db/` directly.
 
 ---
 
@@ -195,7 +221,7 @@ Two evaluation scripts cover the two failure modes that matter in RAG: *retrievi
 python test_retrieval.py
 ```
 
-Runs a hand-labeled test set of 10 questions, each paired with the `uid` of the record that should answer it, and reports **Recall@5** (was the right document retrieved at all?) and **MRR** (how high did it rank?).
+Runs a hand-labeled test set of 10 questions, each paired with the `uid` of the record that should answer it, and reports **Recall@5** (was the right document retrieved at all?) and **MRR** (how high did it rank?). It calls `core.retrieve()` — the same function the app calls — so the score threshold, per-document dedup and any future reranker all show up in these numbers.
 
 Each question was written after reading the target document and asks about something that document actually argues — not merely what its title suggests. A test set built from titles alone measures title matching rather than retrieval.
 
@@ -219,18 +245,19 @@ grep -i "meritocracy" data/records.jsonl
 python eval_llm.py
 ```
 
-For each test question, retrieves context, generates an answer, then asks a second LLM pass to rule on whether the answer is factually supported by that context. Prints any question where the verdict comes back negative. Persona rephrasing is explicitly permitted by the judge prompt — only unsupported *facts* count as hallucination.
+For each test question, retrieves context, generates an answer, then asks a **different** model (`phi4-mini`, overridable via `JUDGE_MODEL`) to rule on whether the answer is factually supported by that context. Persona rephrasing is explicitly permitted by the judge prompt — only unsupported *facts* count as hallucination.
 
-### Chunking sanity checks
+A judge that is the same model as the one under test shares all of its blind spots and will rate its own hallucination as supported, so the judge is deliberately from a different family. This is still a weak signal — it catches gross ungroundedness, not subtle misattribution.
+
+### Offline self-checks
 
 ```bash
-python preview_chunks.py                # stats + random sample chunks
-python preview_chunks.py --short 50     # flag suspiciously short chunks (OCR noise)
-python preview_chunks.py --uid <uid>    # inspect every chunk of one record
-python chunk_quality_report.py          # mid-sentence cuts, junk-character ratio
+python test_core.py
 ```
 
-These are heuristics, not ground truth — they catch obvious extraction damage before you spend hours embedding it. `test_retrieval.py` remains the metric that actually matters.
+Asserts the pure logic — per-document dedup, the score-threshold wiring, the
+refusal path, content-derived point IDs, and filename sanitising — with no
+Qdrant or Ollama running.
 
 ---
 
@@ -239,7 +266,7 @@ These are heuristics, not ground truth — they catch obvious extraction damage 
 ```
 nas_speech/
 ├── nas_speech/                 # Scrapy project
-│   ├── settings.py             # WAF-friendly UA, throttling, pipelines
+│   ├── settings.py             # honest UA, robots.txt, throttling, pipelines
 │   ├── pipelines.py            # uid dedupe + uid-based PDF file paths
 │   └── spiders/
 │       ├── nas_speeches.py     # Stage 1 — record metadata
@@ -247,21 +274,19 @@ nas_speech/
 ├── extract.py                  # Stage 3 — pdftotext
 ├── markdown.py                 # Stage 4 — Markdown + frontmatter
 ├── chunk.py                    # Stage 5 — token-window chunking
-├── index.py                    # Stage 6 — embed + index (resumable)
+├── index.py                    # Stage 6 — embed + index (idempotent upserts)
 ├── core.py                     # Shared RAG logic: retrieve → context → generate
 ├── app.py                      # Streamlit UI
 ├── cli.py                      # Command-line interface
 ├── test_retrieval.py           # Recall@K / MRR
+├── test_core.py                # offline self-checks (no Qdrant, no Ollama)
 ├── eval_llm.py                 # LLM-as-judge groundedness check
-├── preview_chunks.py           # Chunk inspection
-├── chunk_quality_report.py     # Chunk heuristics
 ├── Dockerfile
 ├── docker-compose.yml
 └── data/                       # gitignored — regenerate with the pipeline
     ├── records.jsonl
     ├── pdfs/       text/       markdown/
     ├── chunks.jsonl
-    ├── embed_progress.json
     └── qdrant_db/
 ```
 
@@ -279,7 +304,8 @@ Settings live as module constants rather than a config file. The ones worth know
 | `EMBED_MODEL` | `chunk.py`, `index.py`, `core.py` | `BAAI/bge-m3` |
 | `BATCH_SIZE` | `index.py` | 8 (tuned for 4 GB VRAM — raise if you have headroom) |
 | `OLLAMA_MODEL` | `core.py` | `qwen2.5:3b` |
-| `TOP_K` | `core.py` | 5 |
+| `TOP_K` / `FETCH_K` / `MAX_PER_DOC` | `core.py` | 5 in the prompt, 8 retrieved, max 2 per speech |
+| `SCORE_THRESHOLD` | `core.py` | 0.50 — below this the answer is a refusal, not a guess |
 | `DEVICE` | `core.py` | `"cpu"` (hardcoded; `index.py` auto-detects CUDA) |
 | `SYSTEM_PROMPT` | `core.py` | Grounding directives + persona |
 
@@ -289,6 +315,8 @@ Environment variables (used by the Docker setup):
 |---|---|
 | `QDRANT_URL` | If set, connect to a Qdrant server. If unset, use embedded mode at `data/qdrant_db`. |
 | `OLLAMA_URL` | Ollama chat endpoint. Defaults to `http://localhost:11434/api/chat`. |
+| `QDRANT_API_KEY` | Sent with every Qdrant request in server mode. Required by `docker-compose.yml`. |
+| `JUDGE_MODEL` | Judge model for `eval_llm.py`. Defaults to `phi4-mini:latest`. |
 
 If you change `EMBED_MODEL`, you must re-run `chunk.py` **and** `index.py` — the tokenizer, vector dimension, and existing collection all become invalid.
 
@@ -300,18 +328,23 @@ If you change `EMBED_MODEL`, you must re-run `chunk.py` **and** `index.py` — t
 
 **Why 700-token chunks tokenized with bge-m3.** Chunking with a *different* tokenizer than the embedding model is a common and invisible bug — chunks silently overflow the model's window and get truncated at embed time. Using the same tokenizer for both keeps the numbers honest.
 
-**Why the index is resumable.** Embedding 5,700 chunks on CPU takes hours. A crash three hours in that forces a restart from zero makes the pipeline unusable in practice, so progress is checkpointed after every batch.
+**Why point IDs are content-derived.** Embedding 5,700 chunks on CPU takes hours, so the index has to be resumable — but resuming by *count* silently corrupts the collection the moment the corpus changes: insert one speech and every chunk after it inherits a neighbour's text while retrieval keeps citing confidently. `uuid5(chunk_id)` makes the upsert idempotent by construction, which gives resumability for free and cannot drift.
+
+**Why retrieval has a score floor.** Qdrant always returns `limit` results against a non-empty collection, so without a threshold the "no records" branch is unreachable and a question about cookie recipes still gets five LKY passages presented to the model as authoritative context. The floor is 0.50: measured gold chunks score 0.52-0.74, off-topic queries top out at 0.47.
+
+**Why `num_ctx` is 8192 and the input box is capped.** Overflow at 4096 was not a gentle degradation — Ollama discards context down to `num_ctx / 2` and evicts the oldest KV, which is the system prompt, i.e. the entire grounding directive. The model then answers freely from pretraining with no refusal rule left. 8192 plus a 600-character input cap plus `num_predict: 768` keeps prompt and generation inside the window.
 
 ---
 
 ## Known limitations
 
 - **`.htm`-only records are never indexed.** `nas_pdfs.py` downloads from each record's `pdf` field, so the subset of NAS records published only as `.htm` — including several 2005 speeches and interviews — is absent from the corpus. Closing this gap means adding an HTML fetch-and-parse path to Stage 2.
-- **PDF extraction quality varies.** Older scanned documents produce noisier text than modern digital PDFs. `chunk_quality_report.py` surfaces the worst offenders.
+- **PDF extraction quality varies.** Older scanned documents produce noisier text than modern digital PDFs.
 - **Fixed-size chunking cuts mid-sentence.** The 100-token overlap mitigates this but doesn't eliminate it; paragraph-aware chunking would read more naturally.
 - **No reranking.** Top-5 vector hits go straight into the prompt. A cross-encoder reranker would improve precision at some latency cost.
 - **No conversational memory in retrieval.** Each question is embedded on its own, so follow-ups like "what about after that?" retrieve poorly.
-- **Scraper depends on a WAF quirk.** The `curl` user-agent workaround may stop working if NAS tightens its bot protection; the fallback would be a headless browser.
+- **The crawl may not work as shipped.** The scraper identifies itself honestly and obeys `robots.txt`. NAS's WAF has previously rejected non-`curl` user agents, so a fresh crawl may return empty pages. Getting access is a conversation with the archive, not a technical workaround.
+- **172 scraped records produce no chunks.** 1,328 records scraped, 1,156 with chunks. The gap is unexplained and unaudited.
 
 ---
 
@@ -321,4 +354,4 @@ All source documents come from the [National Archives of Singapore — Speeches]
 
 This project is an independent, non-commercial technical demonstration of RAG architecture. It is **not** affiliated with, endorsed by, or representative of the National Archives of Singapore, the Government of Singapore, or the estate of Lee Kuan Yew. Generated answers are machine-produced approximations and must not be quoted as authentic statements — consult the linked primary sources instead.
 
-The crawler identifies itself with a contact address and respects a 1-second delay with single-request concurrency.
+The crawler identifies itself with a descriptive user agent and a contact address, obeys `robots.txt`, autothrottles, and respects a 1-second delay with single-request concurrency.
