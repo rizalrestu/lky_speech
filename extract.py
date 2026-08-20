@@ -1,13 +1,6 @@
-"""Stage 3: extract text from every downloaded PDF using poppler's pdftotext.
+"""Extract text from data/pdfs with poppler's pdftotext.
 
-Requires poppler-utils installed and `pdftotext` on PATH.
-- Windows: download poppler for Windows, add its `Library\\bin` (or `bin`)
-  folder to PATH, then open a NEW terminal so PATH changes apply.
-- macOS: brew install poppler
-- Linux: apt install poppler-utils
-
-Run from the project root:
-    python extract_text.py
+Needs `pdftotext` on PATH (poppler-utils).
 """
 import shutil
 import subprocess
@@ -42,10 +35,14 @@ def main():
             ok += 1
             continue
 
-        result = subprocess.run(
-            ["pdftotext", "-layout", str(pdf), str(out_path)],
-            capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["pdftotext", "-layout", str(pdf), str(out_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            failed.append((pdf.name, "pdftotext timed out after 120s"))
+            continue
         if result.returncode != 0:
             failed.append((pdf.name, result.stderr.strip()[:200]))
         else:

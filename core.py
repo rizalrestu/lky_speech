@@ -1,13 +1,12 @@
-"""Shared RAG logic"""
+"""Retrieve -> build context -> generate."""
 import os
 import requests
-import torch
-import transformers
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
 QDRANT_PATH = "data/qdrant_db"
 QDRANT_URL = os.getenv("QDRANT_URL", None)
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
 COLLECTION = "lky_speeches"
 EMBED_MODEL = "BAAI/bge-m3"
 
@@ -15,27 +14,32 @@ DEVICE = "cpu"
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = "qwen2.5:3b"
-TOP_K = 5
 
-SYSTEM_PROMPT = """You are Lee Kuan Yew, the founding father of Singapore. Answer the user's question STRICTLY and SOLELY based on the provided context.
+TOP_K = 5            # chunks that reach the prompt
+FETCH_K = 8          # retrieved before dedup
+MAX_PER_DOC = 2      # cap per speech
+SCORE_THRESHOLD = 0.50   # gold chunks score 0.52-0.74, off-topic tops out at 0.47
+
+NO_RECORDS = "I do not have any records or context regarding this matter."
+
+SYSTEM_PROMPT = f"""You are Lee Kuan Yew, the founding father of Singapore. Answer the user's question STRICTLY and SOLELY based on the provided context.
 
 CORE DIRECTIVES:
-1. STRICT GROUNDING (NO HALLUCINATION): You MUST NOT use your internal knowledge. If the provided context does not explicitly contain the answer, you MUST say exactly: "I do not have any records or context regarding this matter." Do not attempt to guess, explain, or be a "know-it-all".
+1. STRICT GROUNDING (NO HALLUCINATION): You MUST NOT use your internal knowledge. If the provided context does not explicitly contain the answer, you MUST say exactly: "{NO_RECORDS}" Do not attempt to guess, explain, or be a "know-it-all".
 2. Persona: If the answer is found, adopt Lee Kuan Yew's signature pragmatic, blunt, and highly logical communication style.
 3. Citations: If you answer, integrate brief citations naturally into your response (e.g., "As I stated in [Speech Title, Year]...").
 """
 
-def load_resources():
-    embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
-    if DEVICE == "cuda":
-        embedder = embedder.half()
-        
+
+def get_client():
+    """Embedded if QDRANT_URL is unset, server otherwise."""
     if QDRANT_URL:
-        client = QdrantClient(url=QDRANT_URL)
-    else:
-        client = QdrantClient(path=QDRANT_PATH)
-        
-    return embedder, client
+        return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    return QdrantClient(path=QDRANT_PATH)
+
+
+def load_resources():
+    return SentenceTransformer(EMBED_MODEL, device=DEVICE), get_client()
 
 
 def retrieve(question, embedder, client, top_k=TOP_K):
@@ -43,10 +47,21 @@ def retrieve(question, embedder, client, top_k=TOP_K):
     response = client.query_points(
         collection_name=COLLECTION,
         query=qvec.tolist(),
-        limit=top_k,
+        limit=FETCH_K,
         with_payload=True,
+        score_threshold=SCORE_THRESHOLD,
     )
-    return response.points
+    # neighbouring chunks overlap ~14% verbatim, so cap how many come from one speech
+    kept, per_doc = [], {}
+    for h in response.points:
+        uid = h.payload.get("uid")
+        if per_doc.get(uid, 0) >= MAX_PER_DOC:
+            continue
+        per_doc[uid] = per_doc.get(uid, 0) + 1
+        kept.append(h)
+        if len(kept) >= top_k:
+            break
+    return kept
 
 
 def build_context(hits):
@@ -67,16 +82,19 @@ def generate(question, context):
             {"role": "user", "content": user_msg},
         ],
         "stream": False,
-        "options": {"num_ctx": 4096} 
-    }, timeout=180)
+        # if prompt + num_predict exceeds num_ctx, Ollama evicts the system prompt
+        "options": {"num_ctx": 8192, "num_predict": 768, "temperature": 0},
+    }, timeout=600)  # first call after boot loads the model
 
     resp.raise_for_status()
-    return resp.json()["message"]["content"]
+    data = resp.json()
+    if "message" not in data:  # errors can arrive with HTTP 200
+        raise RuntimeError(f"Ollama error: {data.get('error', data)}")
+    return data["message"]["content"]
 
 
 def answer_question(question, embedder, client, top_k=TOP_K):
     hits = retrieve(question, embedder, client, top_k=top_k)
     if not hits:
-        return "I'm sorry, I couldn't find any relevant records regarding this matter.", hits
-    context = build_context(hits)
-    return generate(question, context), hits
+        return NO_RECORDS, hits
+    return generate(question, build_context(hits)), hits

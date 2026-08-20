@@ -1,12 +1,6 @@
-"""Stage 2: download every PDF listed in data/records.jsonl -> data/pdfs/<uid>/*.pdf
+"""Download the PDFs listed in data/records.jsonl -> data/pdfs/<uid>/*.pdf
 
-This spider doesn't crawl any web page itself — it just reads the local
-records.jsonl and yields items with file_urls; Scrapy's FilesPipeline
-(subclassed in pipelines.py as NasPdfDownloaderPipeline) takes care of
-actually downloading each PDF, retrying on failure, and skipping files
-that already exist on disk from a previous run.
-
-Run from the project root (where scrapy.cfg lives):
+Reads the local file and hands file_urls to Scrapy's FilesPipeline.
 
     scrapy crawl nas_pdfs
 """
@@ -21,20 +15,13 @@ RECORDS = Path("data/records.jsonl")
 class NasPdfsSpider(scrapy.Spider):
     name = "nas_pdfs"
 
+    # everything else is inherited from settings.py
     custom_settings = {
         "ITEM_PIPELINES": {
             "nas_speech.pipelines.NasPdfDownloaderPipeline": 1,
         },
         "FILES_STORE": "data/pdfs",
         "MEDIA_ALLOW_REDIRECTS": True,
-        "USER_AGENT": "curl/8.0",
-        "DEFAULT_REQUEST_HEADERS": {"From": "hyperfloo26@gmail.com"},
-        "ROBOTSTXT_OBEY": False,
-        "DOWNLOAD_DELAY": 1,
-        "CONCURRENT_REQUESTS_PER_DOMAIN": 1,
-        "RETRY_TIMES": 3,
-        "TWISTED_REACTOR": "twisted.internet.asyncioreactor.AsyncioSelectorReactor",
-        "LOG_LEVEL": "INFO",
     }
 
     async def start(self):

@@ -1,3 +1,4 @@
+"""Ask one question from the terminal."""
 import sys
 
 print("Loading AI libraries, please wait...")

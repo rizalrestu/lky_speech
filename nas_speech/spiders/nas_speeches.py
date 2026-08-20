@@ -1,7 +1,4 @@
-"""Stage 1: crawl NAS speeches search-result pages -> data/records.jsonl
-
-Pagination is plain server-side: ?page-num=N, 20 items/page.
-Run from the project root (where scrapy.cfg lives):
+"""Crawl NAS speech search results -> data/records.jsonl
 
     scrapy crawl nas_speeches -O data/records.jsonl
     scrapy crawl nas_speeches -a last_page=3 -O data/records.jsonl   # testing
@@ -40,6 +37,10 @@ class NasSpeechesSpider(scrapy.Spider):
 
         if page == 1:
             m = R_TOTAL.search(response.text)
+            if not m and not self.last_page:
+                raise scrapy.exceptions.CloseSpider(
+                    "could not parse the item count — the result page layout changed; "
+                    "re-run with -a last_page=N to crawl anyway")
             self.total = int(m.group(1).replace(",", "")) if m else 0
             self.pages = self.last_page or -(-self.total // 20)
             self.logger.info(f"{self.total} items -> {self.pages} pages")

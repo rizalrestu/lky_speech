@@ -1,38 +1,8 @@
-"""The metric that actually matters: retrieval Recall@K and MRR on a small
-hand-labeled test set.
+"""Recall@K and MRR for core.retrieve() over a hand-labeled test set."""
+from core import TOP_K, load_resources, retrieve
 
-Chunking + embedding quality can't really be judged in isolation — the real
-question is "does the right passage come back when I ask a real question?"
-This script answers that directly.
-
-Requires embed_and_index.py to already have run (even just on a small subset
-via `python chunk_markdown.py --limit N` while you're iterating quickly).
-
-Edit TEST_SET below: a handful of real questions paired with the `uid` (from
-data/records.jsonl) of the record that should answer them. Find uids by
-searching titles, e.g.:
-    grep -i "meritocracy" data/records.jsonl
-
-Run:
-    python test_retrieval.py
-"""
-import torch
-import transformers  # noqa: F401  (import order workaround, see chat notes)
-from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
-
-QDRANT_PATH = "data/qdrant_db"
-COLLECTION = "lky_speeches"
-EMBED_MODEL = "BAAI/bge-m3"
-TOP_K = 5
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# (question, expected uid) — the uid should show up somewhere in the top-K
-# results for that question if retrieval is working well.
-#
-# Only records with a PDF attachment reach the corpus (nas_pdfs.py reads
-# row["pdf"]), so .htm-only records can never be retrieved — don't add them here.
+# (question, expected uid). Only records with a PDF attachment reach the corpus,
+# so .htm-only records can never be retrieved — don't add them here.
 TEST_SET = [
     # Political Study Centre seminar, 16 Aug 1964
     ("Why do multi-racial societies formed under colonial rule tend to splinter apart "
@@ -89,22 +59,11 @@ def main():
         print("TEST_SET is empty — add some (question, uid) pairs in this file first.")
         return
 
-    embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
-    if DEVICE == "cuda":
-        embedder = embedder.half()
-    client = QdrantClient(path=QDRANT_PATH)
+    embedder, client = load_resources()
 
     hits, mrr_total = 0, 0.0
     for question, expected_uid in TEST_SET:
-        qvec = embedder.encode([question], normalize_embeddings=True)[0]
-        response = client.query_points(
-            collection_name=COLLECTION,
-            query=qvec.tolist(),
-            limit=TOP_K,
-            with_payload=True,
-        )
-        results = response.points
-        uids = [h.payload.get("uid") for h in results]
+        uids = [h.payload.get("uid") for h in retrieve(question, embedder, client)]
 
         rank = uids.index(expected_uid) + 1 if expected_uid in uids else None
         if rank:

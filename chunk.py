@@ -1,20 +1,6 @@
-"""Stage 5: chunk data/markdown/**/*.md into ~700-token pieces (100-token
-overlap) for embedding, saved to data/chunks.jsonl.
+"""Slice data/markdown into overlapping token windows -> data/chunks.jsonl.
 
-Tokenized with the same tokenizer family as the embedding model (bge-m3) so
-chunk sizes line up with what actually gets embedded later.
-
-Each output row:
-{
-  "chunk_id": "<uid>_<pdf-stem>_<index>",
-  "uid", "title", "speaker", "date", "source", "record_url", "source_file",
-  "text": "<chunk text>"
-}
-
-pip install transformers sentencepiece
-
-Run from the project root:
-    python chunk_markdown.py
+Uses the embedding model's own tokenizer so chunk sizes match what gets embedded.
 """
 import argparse
 import json
@@ -76,18 +62,20 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
     md_files = sorted(MD_DIR.rglob("*.md"))
-    if args.limit:
+    out_path = OUT_PATH
+    if args.limit is not None:
         md_files = md_files[:args.limit]
+        # never overwrite the real corpus
+        out_path = OUT_PATH.with_suffix(".preview.jsonl")
     print(f"found {len(md_files)} markdown files (processing {len(md_files)})")
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     n_chunks = 0
-    with OUT_PATH.open("w", encoding="utf-8") as out:
+    with out_path.open("w", encoding="utf-8") as out:
         for md_path in md_files:
             raw = md_path.read_text(encoding="utf-8")
             meta, body = parse_frontmatter(raw)
-            # drop the leading "# Title" heading added in to_markdown.py —
-            # it's redundant with meta["title"] and would eat token budget
+            # the "# Title" heading duplicates meta["title"]
             body = re.sub(r"^#\s.*\n+", "", body, count=1)
 
             for i, piece in enumerate(chunk_tokens(tokenizer, body, CHUNK_TOKENS, OVERLAP_TOKENS)):
@@ -105,7 +93,7 @@ def main():
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 n_chunks += 1
 
-    print(f"wrote {n_chunks} chunks -> {OUT_PATH}")
+    print(f"wrote {n_chunks} chunks -> {out_path}")
 
 
 if __name__ == "__main__":

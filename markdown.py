@@ -1,13 +1,4 @@
-"""Stage 4: wrap extracted text into RAG-friendly Markdown files with YAML
-frontmatter (title, speaker, date, source, record_url) sourced from
-data/records.jsonl.
-
-Reads:  data/text/<uid>/*.txt      (produced by extract_text.py / pdftotext)
-Writes: data/markdown/<uid>/*.md
-
-Run from the project root:
-    python to_markdown.py
-"""
+"""Wrap data/text into Markdown with YAML frontmatter from records.jsonl."""
 import json
 import re
 from pathlib import Path
@@ -27,7 +18,7 @@ def load_records():
 
 
 def yaml_escape(value):
-    """Render a value as a safe double-quoted YAML scalar."""
+    """Render a value as a double-quoted YAML scalar."""
     if value is None:
         return '""'
     value = str(value).replace("\\", "\\\\").replace('"', '\\"')
@@ -35,7 +26,7 @@ def yaml_escape(value):
 
 
 def clean_body(text):
-    # collapse runs of 3+ blank lines (common pdftotext artifact) down to one
+    # pdftotext leaves runs of blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -61,7 +52,7 @@ def main():
         print(f"{RECORDS} not found — run the nas_speeches spider first")
         return
     if not TEXT_DIR.exists():
-        print(f"{TEXT_DIR} not found — run extract_text.py first")
+        print(f"{TEXT_DIR} not found — run extract.py first")
         return
 
     by_uid = load_records()
