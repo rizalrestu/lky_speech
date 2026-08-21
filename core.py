@@ -74,7 +74,10 @@ def build_context(hits):
 
 
 def generate(question, context):
-    user_msg = f"Context:\n{context}\n\nQuestion: {question}"
+    user_msg = (f"Context:\n{context}\n\nQuestion: {question}\n\n"
+            "Answer in Lee Kuan Yew's first-person voice, using only the context above. "
+            "Cite the speech title and year for each claim you make.")
+
     resp = requests.post(OLLAMA_URL, json={
         "model": OLLAMA_MODEL,
         "messages": [
